@@ -1,5 +1,5 @@
 """
-数据准备模块
+旅游数据准备模块
 """
 
 import logging
@@ -15,21 +15,22 @@ import uuid
 logger = logging.getLogger(__name__)
 
 class DataPreparationModule:
-    """数据准备模块 - 负责数据加载、清洗和预处理"""
-    # 统一维护的分类与难度配置，供外部复用，避免关键词重复定义
+    """旅游数据准备模块 - 负责旅游数据加载、清洗和预处理"""
+    # 统一维护的分类与价格区间配置，供外部复用，避免关键词重复定义
     CATEGORY_MAPPING = {
-        'meat_dish': '荤菜',
-        'vegetable_dish': '素菜',
-        'soup': '汤品',
-        'dessert': '甜品',
-        'breakfast': '早餐',
-        'staple': '主食',
-        'aquatic': '水产',
-        'condiment': '调料',
-        'drink': '饮品'
+        'attraction': '景点',
+        'restaurant': '美食',
+        'hotel': '住宿',
+        'transportation': '交通',
+        'shopping': '购物',
+        'entertainment': '娱乐',
+        'culture': '文化',
+        'nature': '自然风光',
+        'activity': '活动',
+        'practical': '实用信息'
     }
     CATEGORY_LABELS = list(set(CATEGORY_MAPPING.values()))
-    DIFFICULTY_LABELS = ['非常简单', '简单', '中等', '困难', '非常困难']
+    PRICE_LEVELS = ['经济', '中等', '高端', '奢华']
     
     def __init__(self, data_path: str):
         """
@@ -39,7 +40,7 @@ class DataPreparationModule:
             data_path: 数据文件夹路径
         """
         self.data_path = data_path
-        self.documents: List[Document] = []  # 父文档（完整食谱）
+        self.documents: List[Document] = []  # 父文档（完整旅游信息）
         self.chunks: List[Document] = []     # 子文档（按标题分割的小块）
         self.parent_child_map: Dict[str, str] = {}  # 子块ID -> 父文档ID的映射
     
@@ -95,37 +96,43 @@ class DataPreparationModule:
     def _enhance_metadata(self, doc: Document):
         """
         增强文档元数据
-        
+
         Args:
             doc: 需要增强元数据的文档
         """
         file_path = Path(doc.metadata.get('source', ''))
         path_parts = file_path.parts
-        
-        # 提取菜品分类
+
+        # 提取旅游内容分类
         doc.metadata['category'] = '其他'
         for key, value in self.CATEGORY_MAPPING.items():
             if key in path_parts:
                 doc.metadata['category'] = value
                 break
-        
-        # 提取菜品名称
-        doc.metadata['dish_name'] = file_path.stem
 
-        # 分析难度等级
+        # 提取地点/景点名称
+        doc.metadata['location_name'] = file_path.stem
+
+        # 分析价格区间
         content = doc.page_content
-        if '★★★★★' in content:
-            doc.metadata['difficulty'] = '非常困难'
-        elif '★★★★' in content:
-            doc.metadata['difficulty'] = '困难'
-        elif '★★★' in content:
-            doc.metadata['difficulty'] = '中等'
-        elif '★★' in content:
-            doc.metadata['difficulty'] = '简单'
-        elif '★' in content:
-            doc.metadata['difficulty'] = '非常简单'
+        if '奢华' in content or '¥¥¥¥' in content:
+            doc.metadata['price_level'] = '奢华'
+        elif '高端' in content or '¥¥¥' in content:
+            doc.metadata['price_level'] = '高端'
+        elif '中等' in content or '¥¥' in content:
+            doc.metadata['price_level'] = '中等'
+        elif '经济' in content or '¥' in content:
+            doc.metadata['price_level'] = '经济'
         else:
-            doc.metadata['difficulty'] = '未知'
+            doc.metadata['price_level'] = '未知'
+
+        # 提取城市信息（如果文件路径中有城市名）
+        for part in path_parts:
+            if part not in ['data', 'travel', 'src'] and len(part) > 1:
+                doc.metadata['city'] = part
+                break
+        else:
+            doc.metadata['city'] = '未知城市'
 
     @classmethod
     def get_supported_categories(cls) -> List[str]:
@@ -133,9 +140,9 @@ class DataPreparationModule:
         return cls.CATEGORY_LABELS
 
     @classmethod
-    def get_supported_difficulties(cls) -> List[str]:
-        """对外提供支持的难度标签列表"""
-        return cls.DIFFICULTY_LABELS
+    def get_supported_price_levels(cls) -> List[str]:
+        """对外提供支持的价格区间标签列表"""
+        return cls.PRICE_LEVELS
     
     def chunk_documents(self) -> List[Document]:
         """
@@ -173,9 +180,9 @@ class DataPreparationModule:
         """
         # 定义要分割的标题层级
         headers_to_split_on = [
-            ("#", "主标题"),      # 菜品名称
-            ("##", "二级标题"),   # 必备原料、计算、操作等
-            ("###", "三级标题")   # 简易版本、复杂版本等
+            ("#", "主标题"),      # 地点名称
+            ("##", "二级标题"),   # 景点介绍、交通指南、门票信息等
+            ("###", "三级标题")   # 开放时间、游览路线、注意事项等
         ]
 
         # 创建Markdown分割器
@@ -193,17 +200,17 @@ class DataPreparationModule:
                 has_headers = any(line.strip().startswith('#') for line in content_preview.split('\n'))
 
                 if not has_headers:
-                    logger.warning(f"文档 {doc.metadata.get('dish_name', '未知')} 内容中没有发现Markdown标题")
+                    logger.warning(f"文档 {doc.metadata.get('location_name', '未知')} 内容中没有发现Markdown标题")
                     logger.debug(f"内容预览: {content_preview}")
 
                 # 对每个文档进行Markdown分割
                 md_chunks = markdown_splitter.split_text(doc.page_content)
 
-                logger.debug(f"文档 {doc.metadata.get('dish_name', '未知')} 分割成 {len(md_chunks)} 个chunk")
+                logger.debug(f"文档 {doc.metadata.get('location_name', '未知')} 分割成 {len(md_chunks)} 个chunk")
 
                 # 如果没有分割成功，说明文档可能没有标题结构
                 if len(md_chunks) <= 1:
-                    logger.warning(f"文档 {doc.metadata.get('dish_name', '未知')} 未能按标题分割，可能缺少标题结构")
+                    logger.warning(f"文档 {doc.metadata.get('location_name', '未知')} 未能按标题分割，可能缺少标题结构")
 
                 # 为每个子块建立与父文档的关系
                 parent_id = doc.metadata["parent_id"]
@@ -237,26 +244,26 @@ class DataPreparationModule:
     def filter_documents_by_category(self, category: str) -> List[Document]:
         """
         按分类过滤文档
-        
+
         Args:
-            category: 菜品分类
-            
+            category: 旅游内容分类
+
         Returns:
             过滤后的文档列表
         """
         return [doc for doc in self.documents if doc.metadata.get('category') == category]
-    
-    def filter_documents_by_difficulty(self, difficulty: str) -> List[Document]:
+
+    def filter_documents_by_price_level(self, price_level: str) -> List[Document]:
         """
-        按难度过滤文档
-        
+        按价格区间过滤文档
+
         Args:
-            difficulty: 难度等级
-            
+            price_level: 价格区间
+
         Returns:
             过滤后的文档列表
         """
-        return [doc for doc in self.documents if doc.metadata.get('difficulty') == difficulty]
+        return [doc for doc in self.documents if doc.metadata.get('price_level') == price_level]
     
     def get_statistics(self) -> Dict[str, Any]:
         """
@@ -269,47 +276,48 @@ class DataPreparationModule:
             return {}
 
         categories = {}
-        difficulties = {}
+        price_levels = {}
 
         for doc in self.documents:
             # 统计分类
             category = doc.metadata.get('category', '未知')
             categories[category] = categories.get(category, 0) + 1
 
-            # 统计难度
-            difficulty = doc.metadata.get('difficulty', '未知')
-            difficulties[difficulty] = difficulties.get(difficulty, 0) + 1
+            # 统计价格区间
+            price_level = doc.metadata.get('price_level', '未知')
+            price_levels[price_level] = price_levels.get(price_level, 0) + 1
 
         return {
             'total_documents': len(self.documents),
             'total_chunks': len(self.chunks),
             'categories': categories,
-            'difficulties': difficulties,
+            'price_levels': price_levels,
             'avg_chunk_size': sum(chunk.metadata.get('chunk_size', 0) for chunk in self.chunks) / len(self.chunks) if self.chunks else 0
         }
     
     def export_metadata(self, output_path: str):
         """
         导出元数据到JSON文件
-        
+
         Args:
             output_path: 输出文件路径
         """
         import json
-        
+
         metadata_list = []
         for doc in self.documents:
             metadata_list.append({
                 'source': doc.metadata.get('source'),
-                'dish_name': doc.metadata.get('dish_name'),
+                'location_name': doc.metadata.get('location_name'),
                 'category': doc.metadata.get('category'),
-                'difficulty': doc.metadata.get('difficulty'),
+                'price_level': doc.metadata.get('price_level'),
+                'city': doc.metadata.get('city'),
                 'content_length': len(doc.page_content)
             })
-        
+
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(metadata_list, f, ensure_ascii=False, indent=2)
-        
+
         logger.info(f"元数据已导出到: {output_path}")
 
     def get_parent_documents(self, child_chunks: List[Document]) -> List[Document]:
@@ -354,10 +362,10 @@ class DataPreparationModule:
         # 收集父文档名称和相关性信息用于日志
         parent_info = []
         for doc in parent_docs:
-            dish_name = doc.metadata.get('dish_name', '未知菜品')
+            location_name = doc.metadata.get('location_name', '未知地点')
             parent_id = doc.metadata.get('parent_id')
             relevance_count = parent_relevance.get(parent_id, 0)
-            parent_info.append(f"{dish_name}({relevance_count}块)")
+            parent_info.append(f"{location_name}({relevance_count}块)")
 
         logger.info(f"从 {len(child_chunks)} 个子块中找到 {len(parent_docs)} 个去重父文档: {', '.join(parent_info)}")
         return parent_docs
