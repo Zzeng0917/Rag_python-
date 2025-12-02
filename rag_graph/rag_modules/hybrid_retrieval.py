@@ -299,37 +299,49 @@ class HybridRetrievalModule:
             with self.driver.session() as session:
                 cypher_query = """
                 UNWIND $keywords as keyword
-                CALL {
-                    WITH keyword
-                    // 搜索景点
-                    CALL db.index.fulltext.queryNodes('attraction_name_index', keyword + '*')
-                    YIELD node as attraction, score as attraction_score
-                    WHERE attraction:Attraction
-                    RETURN attraction, attraction_score, 'Attraction' as type
-                    UNION ALL
-                    // 搜索城市
-                    CALL db.index.fulltext.queryNodes('city_name_index', keyword + '*')
-                    YIELD node as city, score as city_score
-                    WHERE city:City
-                    RETURN city, city_score, 'City' as type
-                    UNION ALL
-                    // 搜索地区
-                    CALL db.index.fulltext.queryNodes('region_name_index', keyword + '*')
-                    YIELD node as region, score as region_score
-                    WHERE region:Region
-                    RETURN region, region_score, 'Region' as type
-                }
-                YIELD node, score, type
+                CALL db.index.fulltext.queryNodes('attraction_name_index', keyword + '*')
+                YIELD node as attraction, score as attraction_score
+                WHERE attraction:Attraction
                 RETURN
-                    node.nodeId as node_id,
-                    node.name as name,
-                    node.description as description,
-                    node.category as category,
-                    node.ticket_price as ticket_price,
-                    node.address as address,
-                    labels(node) as labels,
-                    type as node_type,
-                    score
+                    attraction.nodeId as node_id,
+                    attraction.name as name,
+                    attraction.description as description,
+                    attraction.category as category,
+                    attraction.ticket_price as ticket_price,
+                    attraction.address as address,
+                    labels(attraction) as labels,
+                    'Attraction' as node_type,
+                    attraction_score as score
+                UNION ALL
+                UNWIND $keywords as keyword
+                CALL db.index.fulltext.queryNodes('city_name_index', keyword + '*')
+                YIELD node as city, score as city_score
+                WHERE city:City
+                RETURN
+                    city.nodeId as node_id,
+                    city.name as name,
+                    city.description as description,
+                    city.category as category,
+                    city.ticket_price as ticket_price,
+                    city.address as address,
+                    labels(city) as labels,
+                    'City' as node_type,
+                    city_score as score
+                UNION ALL
+                UNWIND $keywords as keyword
+                CALL db.index.fulltext.queryNodes('region_name_index', keyword + '*')
+                YIELD node as region, score as region_score
+                WHERE region:Region
+                RETURN
+                    region.nodeId as node_id,
+                    region.name as name,
+                    region.description as description,
+                    region.category as category,
+                    region.ticket_price as ticket_price,
+                    region.address as address,
+                    labels(region) as labels,
+                    'Region' as node_type,
+                    region_score as score
                 ORDER BY score DESC
                 LIMIT $limit
                 """
@@ -529,38 +541,59 @@ class HybridRetrievalModule:
             with self.driver.session() as session:
                 cypher_query = """
                 UNWIND $keywords as keyword
-                CALL {
-                    WITH keyword
-                    // 搜索景点
-                    MATCH (a:Attraction)
-                    WHERE a.category CONTAINS keyword
-                    RETURN a, 'Attraction' as type, a.category as category_info
-                    UNION ALL
-                    // 搜索城市
-                    MATCH (c:City)
-                    WHERE c.highlights CONTAINS keyword OR c.description CONTAINS keyword
-                    RETURN c, 'City' as type, '旅游城市' as category_info
-                    UNION ALL
-                    // 搜索地区
-                    MATCH (r:Region)
-                    WHERE r.description CONTAINS keyword OR r.highlights CONTAINS keyword
-                    RETURN r, 'Region' as type, '旅游地区' as category_info
-                }
-                YIELD node as n, type as node_type, category_info as category
-                WITH n, node_type, keyword, category
-                OPTIONAL MATCH (n)-[:HAS_ATTRACTION]->(a:Attraction)
-                WITH n, node_type, keyword, category, collect(a.name)[0..3] as related_attractions
+                // 搜索景点
+                MATCH (a:Attraction)
+                WHERE a.category CONTAINS keyword
+                WITH a, 'Attraction' as node_type, a.category as category_info, keyword
+                OPTIONAL MATCH (a)-[:HAS_ATTRACTION]->(sub_attraction:Attraction)
+                WITH a, node_type, category_info, keyword, collect(sub_attraction.name)[0..3] as related_attractions
                 RETURN
-                    n.nodeId as node_id,
-                    n.name as name,
+                    a.nodeId as node_id,
+                    a.name as name,
                     node_type as node_type,
-                    category as category_info,
-                    n.description as description,
-                    n.ticket_price as ticket_price,
-                    n.best_time as best_time,
+                    category_info as category_info,
+                    a.description as description,
+                    a.ticket_price as ticket_price,
+                    a.best_time as best_time,
                     related_attractions,
                     keyword as matched_keyword
-                ORDER BY n.name
+                UNION ALL
+                UNWIND $keywords as keyword
+                // 搜索城市
+                MATCH (c:City)
+                WHERE c.highlights CONTAINS keyword OR c.description CONTAINS keyword
+                WITH c, 'City' as node_type, '旅游城市' as category_info, keyword
+                OPTIONAL MATCH (c)-[:HAS_ATTRACTION]->(a:Attraction)
+                WITH c, node_type, category_info, keyword, collect(a.name)[0..3] as related_attractions
+                RETURN
+                    c.nodeId as node_id,
+                    c.name as name,
+                    node_type as node_type,
+                    category_info as category_info,
+                    c.description as description,
+                    c.ticket_price as ticket_price,
+                    c.best_time as best_time,
+                    related_attractions,
+                    keyword as matched_keyword
+                UNION ALL
+                UNWIND $keywords as keyword
+                // 搜索地区
+                MATCH (r:Region)
+                WHERE r.description CONTAINS keyword OR r.highlights CONTAINS keyword
+                WITH r, 'Region' as node_type, '旅游地区' as category_info, keyword
+                OPTIONAL MATCH (r)-[:HAS_ATTRACTION]->(a:Attraction)
+                WITH r, node_type, category_info, keyword, collect(a.name)[0..3] as related_attractions
+                RETURN
+                    r.nodeId as node_id,
+                    r.name as name,
+                    node_type as node_type,
+                    category_info as category_info,
+                    r.description as description,
+                    r.ticket_price as ticket_price,
+                    r.best_time as best_time,
+                    related_attractions,
+                    keyword as matched_keyword
+                ORDER BY name
                 LIMIT $limit
                 """
 

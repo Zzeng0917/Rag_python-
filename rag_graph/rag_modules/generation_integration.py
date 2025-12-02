@@ -65,12 +65,22 @@ class GenerationIntegrationModule:
             raise ValueError("请设置环境变量: LLM_API_KEY 或 ZHIPU_API_KEY")
 
         try:
+            # 设置超时时间（本地模型需要更长时间）
+            timeout = float(os.getenv("REQUEST_TIMEOUT", "60.0"))
+
             if base_url:
-                self.client = OpenAI(api_key=api_key, base_url=base_url)
-                logger.info(f"LLM模型初始化完成")
+                self.client = OpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=timeout
+                )
+                logger.info(f"LLM模型初始化完成，超时时间: {timeout}秒")
             else:
-                self.client = OpenAI(api_key=api_key)
-                logger.info("OpenAI模型初始化完成")
+                self.client = OpenAI(
+                    api_key=api_key,
+                    timeout=timeout
+                )
+                logger.info(f"OpenAI模型初始化完成，超时时间: {timeout}秒")
         except Exception as e:
             logger.error(f"LLM模型初始化失败: {e}")
             raise
