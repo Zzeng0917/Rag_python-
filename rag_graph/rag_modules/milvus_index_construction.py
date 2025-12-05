@@ -21,7 +21,7 @@ class MilvusIndexConstructionModule:
                  port: int = 19530,
                  collection_name: str = "travel_knowledge",
                  dimension: int = 512,
-                 model_name: str = "BAAI/bge-small-zh-v1.5"):
+                 model_name: str = "Qwen/Qwen3-Embedding-8B"):
         """
         初始化Milvus索引构建模块
 

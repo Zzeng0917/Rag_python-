@@ -119,7 +119,25 @@ class IntelligentQueryRouter:
                 max_tokens=800
             )
             
-            result = json.loads(response.choices[0].message.content.strip())
+            # 获取响应内容
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError("LLM 返回空响应")
+            
+            content = content.strip()
+            
+            # 清理 markdown 代码块
+            if content.startswith("```"):
+                # 移除开头的 ```json 或 ```
+                lines = content.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                # 移除结尾的 ```
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines).strip()
+            
+            result = json.loads(content)
             
             analysis = QueryAnalysis(
                 query_complexity=result.get("query_complexity", 0.5),

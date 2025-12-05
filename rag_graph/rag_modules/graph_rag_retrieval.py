@@ -104,7 +104,7 @@ class GraphRAGRetrieval:
                 entity_query = """
                 MATCH (n)
                 WHERE n.id IS NOT NULL
-                WITH n, size((n)--()) as degree
+                WITH n, COUNT { (n)--() } as degree
                 RETURN labels(n) as node_labels, n.id as node_id,
                        n.name as name, n.category as category, degree
                 ORDER BY degree DESC
@@ -246,7 +246,7 @@ class GraphRAGRetrieval:
                     // 路径评分：短路径 + 高度数节点 + 关系类型匹配
                     WITH path, source, target, path_len, rels, path_nodes,
                          (1.0 / path_len) +
-                         (REDUCE(s = 0.0, n IN path_nodes | s + size((n)--())) / 10.0 / size(path_nodes)) +
+                         (REDUCE(s = 0.0, n IN path_nodes | s + COUNT { (n)--() }) / 10.0 / size(path_nodes)) +
                          (CASE WHEN ANY(r IN rels WHERE type(r) IN $relation_types) THEN 0.3 ELSE 0.0 END) as relevance
 
                     ORDER BY relevance DESC

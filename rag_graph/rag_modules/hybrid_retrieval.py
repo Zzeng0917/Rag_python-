@@ -232,7 +232,25 @@ class HybridRetrievalModule:
                 max_tokens=500
             )
             
-            result = json.loads(response.choices[0].message.content.strip())
+            # 获取响应内容
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError("LLM 返回空响应")
+            
+            content = content.strip()
+            
+            # 清理 markdown 代码块
+            if content.startswith("```"):
+                # 移除开头的 ```json 或 ```
+                lines = content.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                # 移除结尾的 ```
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines).strip()
+            
+            result = json.loads(content)
             entity_keywords = result.get("entity_keywords", [])
             topic_keywords = result.get("topic_keywords", [])
             
@@ -292,63 +310,52 @@ class HybridRetrievalModule:
         return results[:top_k]
     
     def _neo4j_entity_level_search(self, keywords: List[str], limit: int) -> List[RetrievalResult]:
-        """Neo4j补充检索"""
+        """Neo4j补充检索 - 使用 CONTAINS 查询，不依赖全文索引"""
         results = []
 
         try:
             with self.driver.session() as session:
+                # 使用简单的 CONTAINS 查询，不依赖全文索引
                 cypher_query = """
                 UNWIND $keywords as keyword
-                CALL db.index.fulltext.queryNodes('attraction_name_index', keyword + '*')
-                YIELD node as attraction, score as attraction_score
-                WHERE attraction:Attraction
-                RETURN
-                    attraction.nodeId as node_id,
-                    attraction.name as name,
-                    attraction.description as description,
-                    attraction.category as category,
-                    attraction.ticket_price as ticket_price,
-                    attraction.address as address,
-                    labels(attraction) as labels,
-                    'Attraction' as node_type,
-                    attraction_score as score
-                UNION ALL
-                UNWIND $keywords as keyword
-                CALL db.index.fulltext.queryNodes('city_name_index', keyword + '*')
-                YIELD node as city, score as city_score
-                WHERE city:City
-                RETURN
-                    city.nodeId as node_id,
-                    city.name as name,
-                    city.description as description,
-                    city.category as category,
-                    city.ticket_price as ticket_price,
-                    city.address as address,
-                    labels(city) as labels,
-                    'City' as node_type,
-                    city_score as score
-                UNION ALL
-                UNWIND $keywords as keyword
-                CALL db.index.fulltext.queryNodes('region_name_index', keyword + '*')
-                YIELD node as region, score as region_score
-                WHERE region:Region
-                RETURN
-                    region.nodeId as node_id,
-                    region.name as name,
-                    region.description as description,
-                    region.category as category,
-                    region.ticket_price as ticket_price,
-                    region.address as address,
-                    labels(region) as labels,
-                    'Region' as node_type,
-                    region_score as score
-                ORDER BY score DESC
+                // 搜索景点
+                OPTIONAL MATCH (a:Attraction)
+                WHERE a.name CONTAINS keyword OR a.description CONTAINS keyword
+                WITH keyword, collect(DISTINCT a)[0..$per_type_limit] as attractions
+                
+                // 搜索城市
+                OPTIONAL MATCH (c:City)
+                WHERE c.name CONTAINS keyword OR c.description CONTAINS keyword
+                WITH keyword, attractions, collect(DISTINCT c)[0..$per_type_limit] as cities
+                
+                // 搜索地区
+                OPTIONAL MATCH (r:Region)
+                WHERE r.name CONTAINS keyword OR r.description CONTAINS keyword
+                WITH keyword, attractions, cities, collect(DISTINCT r)[0..$per_type_limit] as regions
+                
+                // 合并结果
+                UNWIND attractions + cities + regions as node
+                WHERE node IS NOT NULL
+                RETURN DISTINCT
+                    node.nodeId as node_id,
+                    node.name as name,
+                    node.description as description,
+                    node.category as category,
+                    node.ticket_price as ticket_price,
+                    node.address as address,
+                    node.best_time as best_time,
+                    node.highlights as highlights,
+                    labels(node) as labels,
+                    head(labels(node)) as node_type,
+                    keyword as matched_keyword,
+                    1.0 as score
                 LIMIT $limit
                 """
 
                 result = session.run(cypher_query, {
                     "keywords": keywords,
-                    "limit": limit
+                    "limit": limit,
+                    "per_type_limit": max(3, limit // 3)
                 })
 
                 for record in result:
@@ -371,9 +378,9 @@ class HybridRetrievalModule:
                             content_parts.append(f"城市: {record['name']}")
                         if record["description"]:
                             content_parts.append(f"描述: {record['description']}")
-                        if record.get("best_time"):
+                        if record["best_time"]:
                             content_parts.append(f"最佳旅游时间: {record['best_time']}")
-                        if record.get("highlights"):
+                        if record["highlights"]:
                             content_parts.append(f"特色: {record['highlights']}")
                     elif node_type == "Region":
                         if record["name"]:
@@ -381,39 +388,40 @@ class HybridRetrievalModule:
                         if record["description"]:
                             content_parts.append(f"描述: {record['description']}")
 
-                    results.append(RetrievalResult(
-                        content='\n'.join(content_parts),
-                        node_id=record["node_id"],
-                        node_type=node_type,
-                        relevance_score=float(record["score"]) * 0.7,  # 补充检索得分较低
-                        retrieval_level="entity",
-                        metadata={
-                            "name": record["name"],
-                            "category": record.get("category"),
-                            "description": record.get("description"),
-                            "ticket_price": record.get("ticket_price"),
-                            "labels": record["labels"],
-                            "source": "neo4j_fallback"
-                        }
-                    ))
+                    if content_parts:
+                        results.append(RetrievalResult(
+                            content='\n'.join(content_parts),
+                            node_id=record["node_id"] or f"unknown_{len(results)}",
+                            node_type=node_type,
+                            relevance_score=0.7,
+                            retrieval_level="entity",
+                            metadata={
+                                "name": record["name"],
+                                "category": record.get("category"),
+                                "description": record.get("description"),
+                                "ticket_price": record.get("ticket_price"),
+                                "labels": record["labels"],
+                                "matched_keyword": record["matched_keyword"],
+                                "source": "neo4j_contains"
+                            }
+                        ))
 
         except Exception as e:
-            logger.error(f"Neo4j补充检索失败: {e}")
-            # 降级方案：简单查询
+            logger.warning(f"Neo4j CONTAINS 检索失败: {e}，尝试降级方案")
+            # 降级方案：更简单的查询
             try:
                 with self.driver.session() as session:
                     fallback_query = """
                     UNWIND $keywords as keyword
                     MATCH (n)
-                    WHERE n.name CONTAINS keyword
-                      AND (n:City OR n:Attraction OR n:Region)
-                    RETURN
+                    WHERE (n:City OR n:Attraction OR n:Region)
+                      AND n.name CONTAINS keyword
+                    RETURN DISTINCT
                         n.nodeId as node_id,
                         n.name as name,
+                        n.description as description,
                         labels(n) as labels,
-                        head(labels(n)) as node_type,
-                        size(keyword) as score
-                    ORDER BY score DESC
+                        head(labels(n)) as node_type
                     LIMIT $limit
                     """
 
@@ -432,19 +440,23 @@ class HybridRetrievalModule:
                             content_parts.append(f"城市: {record['name']}")
                         elif node_type == "Region":
                             content_parts.append(f"地区: {record['name']}")
+                        
+                        if record["description"]:
+                            content_parts.append(f"描述: {record['description']}")
 
-                        results.append(RetrievalResult(
-                            content='\n'.join(content_parts),
-                            node_id=record["node_id"],
-                            node_type=node_type,
-                            relevance_score=0.6,  # 降级得分更低
-                            retrieval_level="entity",
-                            metadata={
-                                "name": record["name"],
-                                "labels": record["labels"],
-                                "source": "neo4j_fallback_simple"
-                            }
-                        ))
+                        if content_parts:
+                            results.append(RetrievalResult(
+                                content='\n'.join(content_parts),
+                                node_id=record["node_id"] or f"fallback_{len(results)}",
+                                node_type=node_type,
+                                relevance_score=0.6,
+                                retrieval_level="entity",
+                                metadata={
+                                    "name": record["name"],
+                                    "labels": record["labels"],
+                                    "source": "neo4j_fallback_simple"
+                                }
+                            ))
             except Exception as e2:
                 logger.error(f"Neo4j降级检索也失败: {e2}")
 
@@ -608,43 +620,44 @@ class HybridRetrievalModule:
 
                     if node_type == "Attraction":
                         content_parts.append(f"景点: {record['name']}")
-                        if record["description"]:
+                        if record.get("description"):
                             content_parts.append(f"描述: {record['description']}")
-                        if record["ticket_price"]:
+                        if record.get("ticket_price"):
                             content_parts.append(f"门票: {record['ticket_price']}")
                     elif node_type == "City":
                         content_parts.append(f"城市: {record['name']}")
-                        if record["description"]:
+                        if record.get("description"):
                             content_parts.append(f"描述: {record['description']}")
-                        if record["best_time"]:
+                        if record.get("best_time"):
                             content_parts.append(f"最佳旅游时间: {record['best_time']}")
                     elif node_type == "Region":
                         content_parts.append(f"地区: {record['name']}")
-                        if record["description"]:
+                        if record.get("description"):
                             content_parts.append(f"描述: {record['description']}")
 
-                    if record["category"]:
-                        content_parts.append(f"类别: {record['category']}")
+                    if record.get("category_info"):
+                        content_parts.append(f"类别: {record['category_info']}")
 
-                    if record["related_attractions"]:
+                    if record.get("related_attractions"):
                         attractions_str = ', '.join([a for a in record["related_attractions"] if a])
                         if attractions_str:
                             content_parts.append(f"相关景点: {attractions_str}")
 
-                    results.append(RetrievalResult(
-                        content='\n'.join(content_parts),
-                        node_id=record["node_id"],
-                        node_type=node_type,
-                        relevance_score=0.75,  # 补充检索得分
-                        retrieval_level="topic",
-                        metadata={
-                            "name": record["name"],
-                            "category": record["category"],
-                            "description": record["description"],
-                            "matched_keyword": record["matched_keyword"],
-                            "source": "neo4j_fallback"
-                        }
-                    ))
+                    if content_parts:
+                        results.append(RetrievalResult(
+                            content='\n'.join(content_parts),
+                            node_id=record.get("node_id") or f"topic_{len(results)}",
+                            node_type=node_type,
+                            relevance_score=0.75,
+                            retrieval_level="topic",
+                            metadata={
+                                "name": record.get("name"),
+                                "category": record.get("category_info"),
+                                "description": record.get("description"),
+                                "matched_keyword": record.get("matched_keyword"),
+                                "source": "neo4j_topic"
+                            }
+                        ))
                     
         except Exception as e:
             logger.error(f"Neo4j主题级检索失败: {e}")

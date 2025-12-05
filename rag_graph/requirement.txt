@@ -1,3 +1,9 @@
+# CLI 界面依赖 (类似 Kode-cli 风格)
+typer>=0.9.0
+rich>=13.0.0
+prompt_toolkit>=3.0.0
+
+# 核心依赖
 torch==2.6.0
 torchvision==0.21.0
 torchaudio==2.6.0
